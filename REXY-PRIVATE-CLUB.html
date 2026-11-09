@@ -625,48 +625,62 @@ async function ref(){
  }catch(e){return null;}
 }
 async function api(m,p,b,h){let r=await raw(m,p,b,se&&se.access_token,h);if(r.s===401){const refreshed=await ref();if(refreshed===true)r=await raw(m,p,b,se.access_token,h)}return r}
-const gather=()=>{const o={};for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(/^rexy-/.test(k))o[k]=localStorage.getItem(k)}return o};
-let tm=null,progressSyncBusy=false,progressSyncAgain=false,localRevision=0;
+// Only application-owned learning/progress keys are synchronized. This includes
+// the practice timer, which used to remain only in the browser.
+const isProgressKey=k=>/^rexy-/.test(k)||/^ezi-practice-/.test(k);
+const gather=()=>{const o={};for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(isProgressKey(k))o[k]=localStorage.getItem(k)}return o};
+let tm=null,progressSyncBusy=false,progressSyncAgain=false,localRevision=0,syncReady=false;
 const saveProgressBackup=(tag,obj)=>{try{_si.call(localStorage,"ezi-progress-backup-"+tag,JSON.stringify({savedAt:new Date().toISOString(),data:obj}))}catch(e){}};
 const keyStamp=k=>Number(localStorage.getItem("ezi-ts:"+k)||0)||0;
+function syncWarning(message){let el=document.getElementById("rexy-sync-warning");if(!el){el=document.createElement("div");el.id="rexy-sync-warning";el.style.cssText="position:fixed;bottom:12px;left:12px;right:12px;z-index:260;background:#fff3cd;color:#664d03;padding:12px 14px;border-radius:12px;text-align:center;font-size:13px;line-height:1.6";document.body.appendChild(el)}el.textContent=message}
 async function push(){
- if(!se)return false;
+ if(!se||!syncReady)return false;
  if(progressSyncBusy){progressSyncAgain=true;return false}
  progressSyncBusy=true;let allOk=true;
  try{
   do{
    progressSyncAgain=false;const revision=localRevision,t=Date.now(),snapshot=gather(),stamps={};
    Object.keys(snapshot).forEach(k=>{stamps[k]=keyStamp(k)||Number(localStorage.getItem("sbt"))||0});
+   if(!Object.keys(snapshot).length)break;
    saveProgressBackup("before-sync",snapshot);
    const r=await api("POST","/rest/v1/progress?on_conflict=user_id",{user_id:se.uid,data:{_t:t,k:snapshot,v:stamps},updated_at:new Date().toISOString()},{Prefer:"resolution=merge-duplicates"});
-   if(!r.ok){allOk=false;break}
+   if(!r.ok){allOk=false;syncWarning("همگام‌سازی انجام نشد؛ اطلاعات این دستگاه حفظ شده و تا رفع خطا چیزی از سرور جایگزین نمی‌شود.");break}
    _si.call(localStorage,"sbt",String(t));
-   // A write made while the request was in flight must be sent in a second pass.
    if(localRevision!==revision)progressSyncAgain=true;
   }while(progressSyncAgain&&se);
- }catch(e){allOk=false}finally{progressSyncBusy=false}
+ }catch(e){allOk=false;syncWarning("ارتباط با سرور برقرار نشد؛ اطلاعات محلی حفظ شده است.")}finally{progressSyncBusy=false}
  return allOk;
 }
-Storage.prototype.setItem=function(k,v){_si.call(this,k,v);if(this===localStorage&&se&&/^rexy-/.test(k)){localRevision++;_si.call(localStorage,"ezi-ts:"+k,String(Date.now()));clearTimeout(tm);tm=setTimeout(()=>{tm=null;push()},1800)}};
-document.addEventListener("visibilitychange",()=>{if(document.hidden&&se){if(tm){clearTimeout(tm);tm=null}push()}});
+Storage.prototype.setItem=function(k,v){_si.call(this,k,v);if(this===localStorage&&se&&isProgressKey(k)){localRevision++;_si.call(localStorage,"ezi-ts:"+k,String(Date.now()));clearTimeout(tm);tm=setTimeout(()=>{tm=null;push()},1800)}};
+document.addEventListener("visibilitychange",()=>{if(document.hidden&&se&&syncReady){if(tm){clearTimeout(tm);tm=null}push()}});
 async function pull(){
+ if(!se)return{ok:false,reason:"no-session"};
  try{
-  const r=await api("GET","/rest/v1/progress?select=data&user_id=eq."+encodeURIComponent(se.uid)),d=r.ok&&r.j&&r.j[0]&&r.j[0].data;
-  if(d&&d.k&&typeof d.k==="object"){
-   const local=gather(),remote=d.k,remoteStamps=d.v&&typeof d.v==="object"?d.v:{};
-   saveProgressBackup("local-before-merge",local);saveProgressBackup("server-before-merge",remote);
-   let changed=false;
-   Object.keys(remote).forEach(k=>{
-    if(!/^rexy-/.test(k))return;
-    const lt=keyStamp(k)||Number(localStorage.getItem("sbt"))||0;
-    const rt=Number(remoteStamps[k])||Number(d._t)||0;
-    if(!Object.prototype.hasOwnProperty.call(local,k)||rt>lt){_si.call(localStorage,k,remote[k]);_si.call(localStorage,"ezi-ts:"+k,String(rt));changed=true}
-   });
-   const merged=gather();
-   if(changed||Object.keys(merged).some(k=>merged[k]!==remote[k])||Object.keys(remote).some(k=>merged[k]!==remote[k]))await push();
-   _si.call(localStorage,"sbt",String(Math.max(Number(d._t)||0,Number(localStorage.getItem("sbt"))||0)));
-  }else await push();
- }catch(e){}
+  const r=await api("GET","/rest/v1/progress?select=data&user_id=eq."+encodeURIComponent(se.uid));
+  // A failed read is never permission to overwrite the cloud with local/empty data.
+  if(!r.ok||!Array.isArray(r.j)){syncReady=false;syncWarning("بازیابی اطلاعات از سرور ناموفق بود. اطلاعات این دستگاه حفظ شده و فعلاً همگام‌سازی متوقف است.");return{ok:false,reason:"read-failed",status:r.s}}
+  const row=r.j[0];
+  if(!row){syncReady=true;const local=gather();if(Object.keys(local).length)await push();return{ok:true,restored:false,newRecord:true}}
+  let d=row.data;
+  if(typeof d==="string"){try{d=JSON.parse(d)}catch(e){d=null}}
+  if(!d||!d.k||typeof d.k!=="object"||Array.isArray(d.k)){syncReady=false;syncWarning("ساختار نسخه پشتیبان سرور قابل خواندن نیست. برای محافظت از اطلاعات، همگام‌سازی متوقف شده است.");return{ok:false,reason:"invalid-backup"}}
+  const local=gather(),remote=d.k,remoteStamps=d.v&&typeof d.v==="object"?d.v:{};
+  saveProgressBackup("local-before-merge",local);saveProgressBackup("server-before-merge",remote);
+  let changed=false;
+  Object.keys(remote).forEach(k=>{
+   if(!isProgressKey(k)||typeof remote[k]!=="string")return;
+   const lt=keyStamp(k)||Number(localStorage.getItem("sbt"))||0;
+   const rt=Number(remoteStamps[k])||Number(d._t)||0;
+   if(!Object.prototype.hasOwnProperty.call(local,k)||rt>lt){_si.call(localStorage,k,remote[k]);_si.call(localStorage,"ezi-ts:"+k,String(rt));changed=true}
+  });
+  syncReady=true;
+  const merged=gather();
+  const differs=Object.keys(merged).some(k=>merged[k]!==remote[k])||Object.keys(remote).some(k=>isProgressKey(k)&&merged[k]!==remote[k]);
+  if(changed||differs){const ok=await push();if(!ok)return{ok:false,reason:"merge-write-failed"}}
+  _si.call(localStorage,"sbt",String(Math.max(Number(d._t)||0,Number(localStorage.getItem("sbt"))||0)));
+  const warning=document.getElementById("rexy-sync-warning");if(warning)warning.remove();
+  return{ok:true,restored:changed};
+ }catch(e){syncReady=false;syncWarning("بازیابی اطلاعات با خطا روبه‌رو شد. اطلاعات محلی حفظ شده و همگام‌سازی متوقف است.");return{ok:false,reason:"exception"}}
 }
 function act(){api("POST","/rest/v1/activity?on_conflict=user_id,day",{user_id:se.uid,day:new Date().toISOString().slice(0,10)},{Prefer:"resolution=ignore-duplicates"}).catch(()=>{})}
 let cm=0;
