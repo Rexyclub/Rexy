@@ -582,7 +582,7 @@ window.chatClose=()=>{stopVoice();const d=$("chx");if(d)d.remove()};
 })();
 </script>
 <script>
-(function(){
+(async function(){
 const U="https://ubpfdjmhcwkntuadrzsa.supabase.co",K="sb_publishable_y4IZdUd2JBuHZ7qS0Fv8kA_48D5pYys",_si=Storage.prototype.setItem;
 let se=null;
 try{
@@ -592,6 +592,22 @@ try{
  else if(localStorage.getItem("sbsess"))localStorage.removeItem("sbsess");
 }catch(e){try{localStorage.removeItem("sbsess")}catch(_){} }
 const sv=s=>{se=s;try{s?_si.call(localStorage,"sbsess",JSON.stringify(s)):localStorage.removeItem("sbsess")}catch(e){}};
+// Restore the session returned by Supabase after the user confirms their email.
+// The REST signup endpoint uses the implicit token response (URL fragment).
+try{
+ const authParams=new URLSearchParams(location.hash.startsWith("#")?location.hash.slice(1):"");
+ const accessToken=authParams.get("access_token"),refreshToken=authParams.get("refresh_token");
+ if(accessToken&&refreshToken){
+  const userResponse=await fetch(U+"/auth/v1/user",{headers:{apikey:K,Authorization:"Bearer "+accessToken}});
+  if(userResponse.ok){
+   const user=await userResponse.json();
+   if(user&&typeof user.id==="string"&&user.id){
+    sv({access_token:accessToken,refresh_token:refreshToken,uid:user.id,email:user.email||""});
+    history.replaceState(null,"",location.pathname+location.search);
+   }
+  }
+ }
+}catch(e){/* Keep any existing local session and progress if callback parsing fails. */}
 async function raw(m,p,b,tok,h){
  const headers=Object.assign({apikey:K,"Content-Type":"application/json"},h||{});if(tok)headers.Authorization="Bearer "+tok;const r=await fetch(U+p,{method:m,headers,body:b?JSON.stringify(b):undefined});
  let j=null;try{j=await r.json()}catch(e){}return{ok:r.ok,s:r.status,j};
@@ -662,7 +678,7 @@ if(!/^\S+@\S+\.\S+$/.test(e)){m.textContent="ایمیل رو درست وارد �
 if(n){const confirmEmail=document.getElementById("cle").value.trim().toLowerCase();if(confirmEmail!==e){m.textContent="ایمیل حساب و ایمیل تأیید باید یکسان باشن.";return}}
 if(p.length<8){m.textContent="رمز باید حداقل ۸ حرف داشته باشه.";return}
 m.textContent="...";let r;
-try{if(n){const redirect=location.protocol==="https:"?"?redirect_to="+encodeURIComponent(location.origin+"/"):"";r=await raw("POST","/auth/v1/signup"+redirect,{email:e,password:p})}
+try{if(n){const redirect=location.protocol==="https:"?"?redirect_to="+encodeURIComponent(location.origin+location.pathname):"";r=await raw("POST","/auth/v1/signup"+redirect,{email:e,password:p})}
 else r=await raw("POST","/auth/v1/token?grant_type=password",{email:e,password:p})}catch(x){m.textContent="به سرور وصل نشد؛ اینترنتت رو چک کن.";return}
 const j=r.j||{};if(r.ok&&j.access_token&&j.user&&j.user.id){sv({access_token:j.access_token,refresh_token:j.refresh_token,uid:j.user.id,email:e});document.getElementById("cl").remove();await pull();await syncEnt();act()}
 else if(r.ok&&n)m.textContent="ثبت‌نام انجام شد. ایمیل تأیید را باز کن؛ با زدن لینک، دوباره به Rexy برمی‌گردی. بعد با همین ایمیل و رمز وارد شو. اگر ایمیل را ندیدی، پوشه Spam را هم بررسی کن.";else{const detail=(j&&(j.msg||j.message||j.error_description||j.error))||("HTTP "+r.s);m.textContent=n?(String(detail).toLowerCase().includes("already")||String(detail).toLowerCase().includes("registered")?"این ایمیل قبلاً حساب دارد؛ به‌جای ساخت حساب، گزینه ورود را امتحان کن.":"خطای ثبت‌نام: "+detail):"ورود انجام نشد: "+detail}};
